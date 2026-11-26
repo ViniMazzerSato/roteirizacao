@@ -169,6 +169,13 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13.5px}
 .conv{padding:12px 0;border-bottom:1px solid var(--border)}.conv:last-child{border-bottom:0}
 .conv .h{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12.5px;color:var(--muted);margin-bottom:4px}.conv .h b{color:var(--text);font-weight:600}
 
+/* ---------- Seleção em massa ---------- */
+.bulk{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 14px;background:var(--primary-50);border-bottom:1px solid var(--primary-100);color:var(--primary);position:sticky;top:var(--top);z-index:3}
+.bulk .sp{flex:1}.bulk .inp{height:32px;font-size:13px}
+.tbl .ck-cell{width:40px;padding-right:0}.tbl .ck-cell input{width:16px;height:16px;cursor:pointer;accent-color:var(--primary);vertical-align:middle}
+.tbl tr.picked td{background:var(--primary-50)}
+@media (max-width:860px){.bulk{top:56px}.tbl.stack td.ck-cell{padding-left:14px}.tbl.stack td.ck-cell::before{content:none}}
+
 /* ---------- Login ---------- */
 .login{min-height:100vh;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
 .login .l{display:flex;align-items:center;justify-content:center;padding:32px}

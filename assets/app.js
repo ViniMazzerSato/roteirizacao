@@ -70,7 +70,7 @@ const st = {
   me: null, vendedores: [], clientes: [], byCod: new Map(), visitas: new Map(), meses: new Set(), cfg: { ...DEF_CFG },
   view: 'calendario', area: store.get('rv.area') || '', mes: new Date(TODAY.getFullYear(), TODAY.getMonth(), 1), dia: T,
   sel: new Set(), pool: { q: '', status: '', cidade: '', freq: '', modo: 'nao' }, expand: new Set(),
-  rel: { q: '', status: '', page: 0 }, cli: { q: '', status: '', aloc: '', page: 0 },
+  rel: { q: '', status: '', cidade: '', tipo: '', dia: '', page: 0 }, cli: { q: '', status: '', aloc: '', page: 0 }, bsel: new Set(),
   res: { ini: ymd(new Date(TODAY.getFullYear(), TODAY.getMonth(), 1)), fim: T, equipe: '' }
 };
 const vk = (data, cod) => data + '|' + cod;
@@ -110,6 +110,7 @@ function liveApi() {
     async delVisita(data, cod) { chk(await sb.from('visitas').delete().eq('data', data).eq('cod', cod)); },
     async saveConfig(c) { chk(await sb.from('config').update(c).eq('id', 1)); },
     async saveVendedor(v) { chk(await sb.from('vendedores').upsert(v, { onConflict: 'area' })); },
+    async moverClientes(cods, area, equipe) { for (const p of chunk(cods, 300)) chk(await sb.from('clientes').update({ area, equipe, atualizado_em: new Date().toISOString() }).in('cod', p)); },
     async delVendedor(area) { chk(await sb.from('vendedores').delete().eq('area', area)); }
   };
 }
@@ -140,6 +141,7 @@ function demoApi() {
     async delVisita(data, cod) { delete d.visitas[vk(data, cod)]; save(); },
     async saveConfig(c) { d.config = { ...d.config, ...c }; save(); },
     async saveVendedor(v) { d.vend[v.area] = { ...v, _del: false }; save(); },
+    async moverClientes(cods, area, equipe) { cods.forEach(c => { d.cli[c] = { ...(d.cli[c] || {}), cod: c, area, equipe }; }); save(); },
     async delVendedor(area) { d.vend[area] = { area, _del: true }; save(); },
     get seeded() { return d.seeded; }, markSeeded() { d.seeded = true; save(); }
   };
@@ -270,7 +272,7 @@ function vendSelect(allowAll) {
   return `<select class="inp" id="selVend" aria-label="Vendedor" style="min-width:200px">${allowAll ? `<option value="">Todos os vendedores</option>` : ''}${Object.entries(groups).map(([g, l]) => `<optgroup label="${esc(g)}">${l.map(v => `<option value="${esc(v.area)}"${v.area === st.area ? ' selected' : ''}>${esc(v.nome)} · ${esc(v.area)}</option>`).join('')}</optgroup>`).join('')}</select>`;
 }
 function needArea() { if (!st.area && canPick()) { const v = routeVends().filter(v => isAdmin() || v.equipe === st.me.equipe)[0]; if (v) st.area = v.area; } return st.area; }
-function setArea(a) { st.area = a; store.set('rv.area', a); st.sel.clear(); st.rel.page = 0; st.cli.page = 0; render(); }
+function setArea(a) { st.area = a; store.set('rv.area', a); st.sel.clear(); st.bsel.clear(); st.rel.page = 0; st.cli.page = 0; render(); }
 
 function renderShell() {
   const av = allowed();
@@ -403,8 +405,8 @@ function moveTo(cods, ds) {
   st.sel.clear();
   saveRotas(list, list.length > 1 ? `${list.length} clientes alocados em ${brDate(ds)}` : `${list[0].nome} → ${code(list[0])}`);
 }
-function openDistribuir() {
-  const sel = [...st.sel].map(c => st.byCod.get(c)).filter(Boolean);
+function openDistribuir(cods, onDone) {
+  const sel = (cods || [...st.sel]).map(c => st.byCod.get(c)).filter(Boolean);
   modal({
     title: 'Distribuir automaticamente', sub: `${sel.length} clientes selecionados. O sistema agrupa por cidade e equilibra a carga entre os dias.`,
     body: `<div class="fld"><span>Dias de visita</span><div style="display:flex;flex-wrap:wrap;gap:6px">${[1, 2, 3, 4, 5, 6].map(d => `<label class="btn sm ${d < 6 ? 'on' : ''}" style="cursor:pointer"><input type="checkbox" value="${d}" ${d < 6 ? 'checked' : ''} hidden>${DIAS_L[d]}</label>`).join('')}</div></div>
@@ -417,16 +419,15 @@ function openDistribuir() {
         const dias = $$('input[type=checkbox][value]', ov).filter(x => x.checked).map(x => Number(x.value));
         const fm = $('#dFreq', ov).value;
         const list = sel.map(c => { let f = c.freq; if (fm === 'status') f = norm(c.status).startsWith('inativo') ? 'M' : 'Q'; else if (fm !== 'manter') f = fm; return { ...c, freq: f, dia: null }; });
-        const ids = new Set(sel.map(c => c.cod));
-        const ex = $('#dKeep', ov).checked ? clientsOf(st.area).filter(c => c.dia && !ids.has(c.cod)) : [];
-        const res = dias.length ? distribuir(list, ex, dias) : [];
+        const ids = new Set(sel.map(c => c.cod)), keep = $('#dKeep', ov).checked, res = [];
+        if (dias.length) [...new Set(list.map(c => c.area))].forEach(a => { const ex = keep ? clientsOf(a).filter(c => c.dia && !ids.has(c.cod)) : []; res.push(...distribuir(list.filter(c => c.area === a), ex, dias)); });
         const per = {}; res.forEach(c => per[c.dia] = (per[c.dia] || 0) + 1);
         $('#dPrev', ov).innerHTML = dias.length ? `<div class="small muted" style="margin-bottom:8px">Clientes por dia da semana</div>${dias.map(d => `<div class="hbar"><span>${DIAS_L[d]}</span><span class="t"><i style="width:${(per[d] || 0) / Math.max(1, ...Object.values(per)) * 100}%;background:var(--primary)"></i></span><span class="v">${per[d] || 0}</span></div>`).join('')}` : '<span class="muted">Escolha ao menos um dia.</span>';
         return res;
       };
       $$('label.btn', ov).forEach(l => l.addEventListener('click', e => { e.preventDefault(); const i = $('input', l); i.checked = !i.checked; l.classList.toggle('on', i.checked); calc(); }));
       $('#dFreq', ov).onchange = calc; $('#dKeep', ov).onchange = calc; calc();
-      $('#dGo', ov).onclick = () => { const r = calc(); if (!r.length) return; close(); st.sel.clear(); saveRotas(r, `${r.length} clientes distribuídos no calendário`); };
+      $('#dGo', ov).onclick = () => { const r = calc(); if (!r.length) return; close(); st.sel.clear(); st.bsel.clear(); saveRotas(r, `${r.length} clientes distribuídos no calendário`); onDone && onDone(); };
     }
   });
 }
@@ -540,10 +541,61 @@ async function vRoteiro() {
   $('#xAdd').onclick = () => { const q = $('#xq').value.trim(); if (!q) return; const code0 = q.split(' — ')[0]; const c = st.byCod.get(code0) || clientsOf(area).find(c => norm(c.nome + ' ' + c.cod).includes(norm(q))); if (!c) { toast('Cliente não encontrado', 'bad'); return; } saveVisita(c.cod, { visitou: true }); toast(c.nome + ' adicionado ao dia'); };
 }
 
+
+/* =================== SELEÇÃO E ALTERAÇÃO EM MASSA =================== */
+const TIPOS = [['S', 'S · Semanal'], ['Q1', 'Q1 · Quinzenal, semanas ímpares'], ['Q2', 'Q2 · Quinzenal, semanas pares'], ['M1', 'M1 · Mensal, 1ª semana'], ['M2', 'M2 · Mensal, 2ª semana'], ['M3', 'M3 · Mensal, 3ª semana'], ['M4', 'M4 · Mensal, 4ª semana'], ['M5', 'M5 · Mensal, 5ª semana']];
+const ckHead = pageCods => `<th class="ck-cell"><input type="checkbox" class="bk" data-all="1" ${pageCods.length && pageCods.every(c => st.bsel.has(c)) ? 'checked' : ''} aria-label="Selecionar todos desta página"></th>`;
+const ckCell = cod => `<td class="ck-cell"><input type="checkbox" class="bk" data-ck="${esc(cod)}" ${st.bsel.has(cod) ? 'checked' : ''} aria-label="Selecionar cliente"></td>`;
+function bulkBar(rows) {
+  const n = st.bsel.size; if (!n) return '';
+  const vs = isAdmin() ? routeVends() : [];
+  return `<div class="bulk"><b>${num(n)} selecionado${n > 1 ? 's' : ''}</b>${rows.length > n ? `<button class="btn ghost sm" id="bkAll">Selecionar todos os ${num(rows.length)} do filtro</button>` : ''}<span class="sp"></span>
+    ${canRoute() ? `<select class="inp" id="bkTipo" aria-label="Tipo de visita"><option value="">Tipo de visita: manter</option>${TIPOS.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
+    <select class="inp" id="bkDia" aria-label="Dia"><option value="">Dia: manter</option>${[1, 2, 3, 4, 5, 6].map(d => `<option value="${d}">${DIAS_L[d]}</option>`).join('')}<option value="0">Tirar do calendário</option></select>` : ''}
+    ${vs.length ? `<select class="inp" id="bkVend" aria-label="Vendedor"><option value="">Vendedor: manter</option>${vs.map(v => `<option value="${esc(v.area)}">${esc(v.nome)} · ${esc(v.area)}</option>`).join('')}</select>` : ''}
+    <button class="btn pri sm" id="bkGo">Aplicar</button>${canRoute() ? `<button class="btn sm" id="bkDist">${ico('wand')}Distribuir</button>` : ''}<button class="btn ghost sm icon" id="bkClr" aria-label="Limpar seleção">${ico('x')}</button></div>`;
+}
+function bindBulk(rows, pageCods) {
+  const pg = $('#page');
+  pg.onchange = e => {
+    const b = e.target.closest('.bk'); if (!b) return;
+    if (b.dataset.all) { const on = b.checked; pageCods.forEach(c => on ? st.bsel.add(c) : st.bsel.delete(c)); }
+    else b.checked ? st.bsel.add(b.dataset.ck) : st.bsel.delete(b.dataset.ck);
+    render();
+  };
+  const a = $('#bkAll'); if (a) a.onclick = () => { rows.forEach(c => st.bsel.add(c.cod)); render(); };
+  const c = $('#bkClr'); if (c) c.onclick = () => { st.bsel.clear(); render(); };
+  const d = $('#bkDist'); if (d) d.onclick = () => openDistribuir([...st.bsel]);
+  const g = $('#bkGo'); if (g) g.onclick = () => applyBulk(($('#bkTipo') || {}).value || '', ($('#bkDia') || {}).value || '', ($('#bkVend') || {}).value || '');
+}
+async function applyBulk(tipo, dia, vend) {
+  const cods = [...st.bsel].filter(c => st.byCod.has(c));
+  if (!cods.length) return;
+  if (!tipo && !dia && !vend) { toast('Escolha o que alterar: tipo de visita, dia ou vendedor', 'bad'); return; }
+  if (vend) {
+    const v = vendByArea(vend), prev = cods.map(c => [c, st.byCod.get(c).area, st.byCod.get(c).equipe]);
+    cods.forEach(c => Object.assign(st.byCod.get(c), { area: vend, equipe: v.equipe || null }));
+    try { await api.moverClientes(cods, vend, v.equipe || null); }
+    catch (e) { prev.forEach(([c, a, q]) => Object.assign(st.byCod.get(c), { area: a, equipe: q })); render(); toast(errMsg(e), 'bad'); return; }
+  }
+  st.bsel.clear();
+  if (tipo || dia) {
+    const list = cods.map(cod => {
+      const c = st.byCod.get(cod), n = { ...c };
+      if (tipo) { n.freq = tipo[0]; n.semana = tipo === 'S' ? 0 : Number(tipo[1]); }
+      if (dia === '0') { n.dia = null; n.ordem = null; } else if (dia) { n.dia = Number(dia); if (c.dia !== n.dia) n.ordem = null; }
+      return n;
+    });
+    const ex = list[0]; const ok = list.every(n => code(n) === code(ex));
+    await saveRotas(list, `${num(list.length)} clientes atualizados${ok && ex.dia ? ' · ' + code(ex) : ''}${vend ? ' e transferidos para ' + vendName(vend) : ''}`);
+  } else { render(); toast(`${num(cods.length)} clientes transferidos para ${vendName(vend)}`); }
+}
+
 /* =================== RELATÓRIO =================== */
 function relRows() {
   const R = st.rel, q = norm(R.q);
-  return clientsOf(st.area).filter(c => (!R.status || (R.status === 'nao' ? !c.dia : norm(c.status) === norm(R.status))) && (!q || norm([c.nome, c.cod, c.cidade, code(c)].join(' ')).includes(q)))
+  const tipoOf = c => !c.dia ? '' : c.freq === 'S' ? 'S' : (c.freq === 'Q' ? 'Q' : 'M') + c.semana;
+  return clientsOf(st.area).filter(c => (!R.status || (R.status === 'nao' ? !c.dia : norm(c.status) === norm(R.status))) && (!R.cidade || c.cidade === R.cidade) && (!R.tipo || (R.tipo === 'nao' ? !c.dia : tipoOf(c) === R.tipo)) && (!R.dia || String(c.dia || '') === R.dia) && (!q || norm([c.nome, c.cod, c.cidade, code(c)].join(' ')).includes(q)))
     .sort((a, b) => String(a.area).localeCompare(b.area) || (a.dia || 9) - (b.dia || 9) || (a.semana || 0) - (b.semana || 0) || (a.ordem ?? 999) - (b.ordem ?? 999) || String(a.nome).localeCompare(b.nome, 'pt-BR'));
 }
 function vRelatorio() {
@@ -566,15 +618,23 @@ function vRelatorio() {
     <tr><td><b>Visitas em ${esc(m.toLocaleDateString('pt-BR', { month: 'long' }))}</b></td>${[1, 2, 3, 4, 5, 6].map(d => `<td><b>${mes[d] || '—'}</b></td>`).join('')}<td><b>${num(Object.values(mes).reduce((a, b) => a + b, 0))}</b></td></tr></tbody></table></div></div>
   <div class="card"><div class="card-h" style="flex-wrap:wrap"><h3>Clientes e código de visita</h3><span class="pill">${num(rows.length)}</span><span class="sp"></span>
     <div class="search" style="width:260px">${ico('search')}<input class="inp" id="rq" placeholder="Buscar cliente, cidade, código" value="${esc(st.rel.q)}"></div>
-    <select class="inp" id="rs"><option value="">Todos</option><option value="nao"${st.rel.status === 'nao' ? ' selected' : ''}>Não alocados</option>${['Ativo', 'Pré-Inativo', 'Inativo'].map(s => `<option${s === st.rel.status ? ' selected' : ''}>${s}</option>`).join('')}</select>
+    <select class="inp" id="rs"><option value="">Todos os status</option>${['Ativo', 'Pré-Inativo', 'Inativo'].map(s => `<option${s === st.rel.status ? ' selected' : ''}>${s}</option>`).join('')}</select>
+    <select class="inp" id="rc"><option value="">Todas as cidades</option>${[...new Set(cls.map(c => c.cidade).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'pt-BR')).map(x => `<option${x === st.rel.cidade ? ' selected' : ''}>${esc(x)}</option>`).join('')}</select>
+    <select class="inp" id="rt"><option value="">Todos os tipos</option><option value="nao"${st.rel.tipo === 'nao' ? ' selected' : ''}>Não alocados</option>${TIPOS.map(([k]) => `<option value="${k}"${k === st.rel.tipo ? ' selected' : ''}>${k}</option>`).join('')}</select>
+    <select class="inp" id="rd"><option value="">Todos os dias</option>${[1, 2, 3, 4, 5, 6].map(d => `<option value="${d}"${String(d) === st.rel.dia ? ' selected' : ''}>${DIAS_L[d]}</option>`).join('')}</select>
     <button class="btn" id="rx">${ico('download')}Exportar Excel</button></div>
-    <div class="tbl-wrap"><table class="tbl stack"><thead><tr><th>Visita</th><th>Código</th><th>Cliente</th><th>Cidade</th><th>Status</th>${st.area ? '' : '<th>Vendedor</th>'}<th>Frequência</th><th class="r">Visitas no mês</th></tr></thead><tbody id="rtb">
-    ${pg.map(c => `<tr class="click" data-cod="${esc(c.cod)}"><td>${codePill(c)}</td><td class="muted">${esc(c.cod)}</td><td class="nm">${esc(c.nome)}</td><td>${esc(c.cidade || '')}</td><td>${statusPill(c.status)}</td>${st.area ? '' : `<td>${esc(vendName(c.area))}</td>`}<td>${esc(FREQ[c.freq])}</td><td class="r">${c.dia ? visitsInMonth(c, m) : '—'}</td></tr>`).join('') || `<tr><td colspan="8"><div class="empty">Nenhum cliente neste filtro.</div></td></tr>`}</tbody></table></div>
+    ${bulkBar(rows)}
+    <div class="tbl-wrap"><table class="tbl stack"><thead><tr>${ckHead(pg.map(c => c.cod))}<th>Visita</th><th>Código</th><th>Cliente</th><th>Cidade</th><th>Status</th>${st.area ? '' : '<th>Vendedor</th>'}<th>Frequência</th><th class="r">Visitas no mês</th></tr></thead><tbody id="rtb">
+    ${pg.map(c => `<tr class="click${st.bsel.has(c.cod) ? ' picked' : ''}" data-cod="${esc(c.cod)}">${ckCell(c.cod)}<td>${codePill(c)}</td><td class="muted">${esc(c.cod)}</td><td class="nm">${esc(c.nome)}</td><td>${esc(c.cidade || '')}</td><td>${statusPill(c.status)}</td>${st.area ? '' : `<td>${esc(vendName(c.area))}</td>`}<td>${esc(FREQ[c.freq])}</td><td class="r">${c.dia ? visitsInMonth(c, m) : '—'}</td></tr>`).join('') || `<tr><td colspan="9"><div class="empty">Nenhum cliente neste filtro.</div></td></tr>`}</tbody></table></div>
     ${pages > 1 ? `<div class="pager"><span>Página ${st.rel.page + 1} de ${pages}</span><span class="sp" style="flex:1"></span><button class="btn sm" id="rpP" ${st.rel.page ? '' : 'disabled'}>Anterior</button><button class="btn sm" id="rpN" ${st.rel.page < pages - 1 ? '' : 'disabled'}>Próxima</button></div>` : ''}</div>`;
   let t; $('#rq').oninput = e => { st.rel.q = e.target.value; st.rel.page = 0; clearTimeout(t); t = setTimeout(() => { render(); const i = $('#rq'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }, 250); };
   $('#rs').onchange = e => { st.rel.status = e.target.value; st.rel.page = 0; render(); };
+  $('#rc').onchange = e => { st.rel.cidade = e.target.value; st.rel.page = 0; render(); };
+  $('#rt').onchange = e => { st.rel.tipo = e.target.value; st.rel.page = 0; render(); };
+  $('#rd').onchange = e => { st.rel.dia = e.target.value; st.rel.page = 0; render(); };
+  bindBulk(rows, pg.map(c => c.cod));
   const p = $('#rpP'), n = $('#rpN'); if (p) p.onclick = () => { st.rel.page--; render(); }; if (n) n.onclick = () => { st.rel.page++; render(); };
-  $('#rtb').onclick = e => { const r = e.target.closest('tr[data-cod]'); if (r) openCliente(r.dataset.cod); };
+  $('#rtb').onclick = e => { if (e.target.closest('.ck-cell')) return; const r = e.target.closest('tr[data-cod]'); if (r) openCliente(r.dataset.cod); };
   $('#rx').onclick = () => exportXlsx(`roteiro_${st.area ? vendName(st.area).replace(/\W+/g, '_') : 'todos'}_${ymd(m).slice(0, 7)}.xlsx`, ['Visita', 'Freq', 'Semana', 'Dia', 'Ordem', 'Código', 'Cliente', 'Cidade', 'Endereço', 'Telefone', 'Status', 'Segmento', 'Área', 'Vendedor', 'Equipe', 'Visitas no mês'],
     rows.map(c => [c.dia ? code(c) : '', FREQ[c.freq], c.freq === 'S' ? 'Toda' : c.freq === 'Q' ? (c.semana === 2 ? 'Par' : 'Ímpar') : c.semana + 'ª', c.dia ? DIAS_L[c.dia] : '', c.ordem ?? '', c.cod, c.nome, c.cidade || '', c.endereco || '', c.telefone || '', c.status || '', c.segmento || '', c.area || '', vendName(c.area), c.equipe || '', c.dia ? visitsInMonth(c, m) : 0]), 'Roteiro');
 }
@@ -652,14 +712,16 @@ function vClientes() {
     <div class="search" style="width:260px">${ico('search')}<input class="inp" id="cq" placeholder="Nome, código, cidade, telefone" value="${esc(F.q)}"></div>
     <select class="inp" id="cs"><option value="">Todos os status</option>${['Ativo', 'Pré-Inativo', 'Inativo'].map(s => `<option${s === F.status ? ' selected' : ''}>${s}</option>`).join('')}</select>
     <select class="inp" id="ca"><option value="">Alocados e não alocados</option><option value="s"${F.aloc === 's' ? ' selected' : ''}>Só alocados</option><option value="n"${F.aloc === 'n' ? ' selected' : ''}>Só não alocados</option></select></div>
-    <div class="tbl-wrap"><table class="tbl stack"><thead><tr><th>Código</th><th>Cliente</th><th>Cidade</th><th>Telefone</th><th>Segmento</th><th>Status</th><th class="r">Dias sem compra</th>${st.area ? '' : '<th>Vendedor</th>'}<th>Visita</th></tr></thead><tbody id="ctb">
-    ${rows.slice(F.page * PG, F.page * PG + PG).map(c => `<tr class="click" data-cod="${esc(c.cod)}"><td class="muted">${esc(c.cod)}</td><td class="nm">${esc(c.nome)}</td><td>${esc(c.cidade || '')}</td><td style="white-space:nowrap">${esc(c.telefone || '')}</td><td>${esc(c.segmento || '')}</td><td>${statusPill(c.status)}</td><td class="r">${c.dias_sem_compra ?? '—'}</td>${st.area ? '' : `<td>${esc(vendName(c.area))}</td>`}<td>${codePill(c)}</td></tr>`).join('') || `<tr><td colspan="9"><div class="empty"><b>Nenhum cliente</b>${st.clientes.length ? 'Ajuste os filtros.' : 'Importe a Carteira de Clientes para começar.'}</div></td></tr>`}</tbody></table></div>
+    ${bulkBar(rows)}
+    <div class="tbl-wrap"><table class="tbl stack"><thead><tr>${ckHead(rows.slice(F.page * PG, F.page * PG + PG).map(c => c.cod))}<th>Código</th><th>Cliente</th><th>Cidade</th><th>Telefone</th><th>Segmento</th><th>Status</th><th class="r">Dias sem compra</th>${st.area ? '' : '<th>Vendedor</th>'}<th>Visita</th></tr></thead><tbody id="ctb">
+    ${rows.slice(F.page * PG, F.page * PG + PG).map(c => `<tr class="click${st.bsel.has(c.cod) ? ' picked' : ''}" data-cod="${esc(c.cod)}">${ckCell(c.cod)}<td class="muted">${esc(c.cod)}</td><td class="nm">${esc(c.nome)}</td><td>${esc(c.cidade || '')}</td><td style="white-space:nowrap">${esc(c.telefone || '')}</td><td>${esc(c.segmento || '')}</td><td>${statusPill(c.status)}</td><td class="r">${c.dias_sem_compra ?? '—'}</td>${st.area ? '' : `<td>${esc(vendName(c.area))}</td>`}<td>${codePill(c)}</td></tr>`).join('') || `<tr><td colspan="10"><div class="empty"><b>Nenhum cliente</b>${st.clientes.length ? 'Ajuste os filtros.' : 'Importe a Carteira de Clientes para começar.'}</div></td></tr>`}</tbody></table></div>
     ${pages > 1 ? `<div class="pager"><span>Página ${F.page + 1} de ${pages}</span><span class="sp" style="flex:1"></span><button class="btn sm" id="cpP" ${F.page ? '' : 'disabled'}>Anterior</button><button class="btn sm" id="cpN" ${F.page < pages - 1 ? '' : 'disabled'}>Próxima</button></div>` : ''}</div>`;
   let t; $('#cq').oninput = e => { F.q = e.target.value; F.page = 0; clearTimeout(t); t = setTimeout(() => { render(); const i = $('#cq'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }, 250); };
   $('#cs').onchange = e => { F.status = e.target.value; F.page = 0; render(); };
   $('#ca').onchange = e => { F.aloc = e.target.value; F.page = 0; render(); };
   const p = $('#cpP'), n = $('#cpN'); if (p) p.onclick = () => { F.page--; render(); }; if (n) n.onclick = () => { F.page++; render(); };
-  $('#ctb').onclick = e => { const r = e.target.closest('tr[data-cod]'); if (r) openCliente(r.dataset.cod); };
+  $('#ctb').onclick = e => { if (e.target.closest('.ck-cell')) return; const r = e.target.closest('tr[data-cod]'); if (r) openCliente(r.dataset.cod); };
+  bindBulk(rows, rows.slice(F.page * PG, F.page * PG + PG).map(c => c.cod));
   const im = $('#imp'); if (im) im.onclick = openImport;
 }
 const FIELDS = [
